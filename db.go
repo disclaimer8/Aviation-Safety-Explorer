@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -19,6 +20,8 @@ type Accident struct {
 	Fatalities     string `json:"fatalities"`
 	Location       string `json:"location"`
 	SourceURL      string `json:"source_url"` // can be comma-separated now
+	Lat            float64 `json:"lat"`
+	Lon            float64 `json:"lon"`
 }
 
 // NormalizeDate attempts to convert various date strings into YYYY-MM-DD.
@@ -47,14 +50,14 @@ func NormalizeDate(dateStr string) string {
 	return dateStr
 }
 
-// InitDB initializes the SQLite database and creates the accidents table if it doesn't exist.
-func InitDB(dbPath string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+// InitDB sets up the SQLite database and creates the necessary tables and indexes.
+func InitDB(filepath string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", filepath)
 	if err != nil {
 		return nil, err
 	}
 
-	createTableSQL := `
+	createTableQuery := `
 	CREATE TABLE IF NOT EXISTS accidents (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		normalized_date TEXT,
@@ -63,12 +66,28 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		operator TEXT,
 		fatalities TEXT,
 		location TEXT,
-		source_url TEXT UNIQUE
+		source_url TEXT,
+		lat REAL,
+		lon REAL
 	);`
 
-	_, err = db.Exec(createTableSQL)
+	_, err = db.Exec(createTableQuery)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create table: %w", err)
+	}
+
+	// Try to alter table if it already exists from previous versions
+	db.Exec(`ALTER TABLE accidents ADD COLUMN lat REAL;`)
+	db.Exec(`ALTER TABLE accidents ADD COLUMN lon REAL;`)
+
+	// Create Indexes for performance
+	indexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_aircraft ON accidents(aircraft_model);`,
+		`CREATE INDEX IF NOT EXISTS idx_operator ON accidents(operator);`,
+		`CREATE INDEX IF NOT EXISTS idx_date ON accidents(date);`,
+	}
+	for _, idx := range indexes {
+		db.Exec(idx)
 	}
 
 	return db, nil
@@ -128,14 +147,14 @@ func InsertAccident(db *sql.DB, accident Accident) error {
 }
 
 func insertNew(db *sql.DB, accident Accident) error {
-	insertSQL := `INSERT OR IGNORE INTO accidents(normalized_date, date, aircraft_model, operator, fatalities, location, source_url) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	insertSQL := `INSERT INTO accidents(normalized_date, date, aircraft_model, operator, fatalities, location, source_url, lat, lon) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	statement, err := db.Prepare(insertSQL)
 	if err != nil {
 		return err
 	}
 	defer statement.Close()
 
-	_, err = statement.Exec(accident.NormalizedDate, accident.Date, accident.AircraftModel, accident.Operator, accident.Fatalities, accident.Location, accident.SourceURL)
+	_, err = statement.Exec(accident.NormalizedDate, accident.Date, accident.AircraftModel, accident.Operator, accident.Fatalities, accident.Location, accident.SourceURL, accident.Lat, accident.Lon)
 	if err != nil {
 		return err
 	}
@@ -145,7 +164,7 @@ func insertNew(db *sql.DB, accident Accident) error {
 
 // GetAccidents retrieves accidents with pagination for the API.
 func GetAccidents(db *sql.DB, limit, offset int) ([]Accident, error) {
-	query := `SELECT id, date, aircraft_model, operator, fatalities, location, source_url FROM accidents ORDER BY normalized_date DESC, id DESC LIMIT ? OFFSET ?`
+	query := `SELECT id, date, aircraft_model, operator, fatalities, location, source_url, COALESCE(lat, 0), COALESCE(lon, 0) FROM accidents ORDER BY normalized_date DESC, id DESC LIMIT ? OFFSET ?`
 	rows, err := db.Query(query, limit, offset)
 	if err != nil {
 		return nil, err
@@ -155,8 +174,7 @@ func GetAccidents(db *sql.DB, limit, offset int) ([]Accident, error) {
 	var accidents []Accident
 	for rows.Next() {
 		var a Accident
-		err = rows.Scan(&a.ID, &a.Date, &a.AircraftModel, &a.Operator, &a.Fatalities, &a.Location, &a.SourceURL)
-		if err != nil {
+		if err := rows.Scan(&a.ID, &a.Date, &a.AircraftModel, &a.Operator, &a.Fatalities, &a.Location, &a.SourceURL, &a.Lat, &a.Lon); err != nil {
 			log.Println("Error scanning row:", err)
 			continue
 		}

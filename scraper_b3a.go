@@ -7,86 +7,80 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gocolly/colly/v2"
+	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/launcher"
+	"github.com/go-rod/stealth"
 )
 
-// ScrapeB3A begins the scraping process for the Bureau of Aircraft Accidents Archives.
+// ScrapeB3A begins the scraping process for B3A archives using a headless browser.
 func ScrapeB3A(db *sql.DB, startYear, endYear int) {
-	c := colly.NewCollector(
-		colly.AllowedDomains("www.baaa-acro.com", "baaa-acro.com"),
-		colly.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"),
-	)
-
-	c.Limit(&colly.LimitRule{
-		DomainGlob:  "*baaa-acro.com*",
-		Parallelism: 1,
-		RandomDelay: 2 * time.Second,
-	})
-
-	c.OnRequest(func(r *colly.Request) {
-		fmt.Println("Visiting", r.URL.String())
-	})
-
-	// Assuming a standard table structure on B3A archives.
-	// B3A usually has tables with Date, Aircraft, Operator, Location.
-	c.OnHTML("table tbody tr", func(e *colly.HTMLElement) {
-		cells := e.ChildTexts("td")
-		if len(cells) < 4 {
-			return
-		}
-
-		date := strings.TrimSpace(cells[0])
-		model := strings.TrimSpace(cells[1])
-		operator := strings.TrimSpace(cells[2])
-		
-		// B3A sometimes mixes location or fatalities in later columns.
-		// We'll extract what we confidently can.
-		location := ""
-		if len(cells) > 3 {
-			location = strings.TrimSpace(cells[3])
-		}
-
-		fatalities := ""
-		if len(cells) > 4 {
-			fatalities = strings.TrimSpace(cells[4])
-		}
-
-		sourceURL := e.Request.AbsoluteURL(e.ChildAttr("td a", "href"))
-		if sourceURL == "" {
-			sourceURL = e.Request.URL.String() + "#" + date
-		}
-
-		if date == "" || model == "" {
-			return
-		}
-
-		accident := Accident{
-			Date:          date,
-			AircraftModel: model,
-			Operator:      operator,
-			Fatalities:    fatalities,
-			Location:      location,
-			SourceURL:     sourceURL,
-		}
-
-		err := InsertAccident(db, accident)
-		if err != nil {
-			log.Printf("Error saving B3A accident: %v\n", err)
-		}
-	})
-
-	c.OnError(func(r *colly.Response, err error) {
-		log.Println("Request URL:", r.Request.URL, "failed with error:", err)
-	})
+	fmt.Println("Initializing Headless Browser for B3A...")
+	
+	path, _ := launcher.LookPath()
+	u := launcher.New().Bin(path).Headless(true).MustLaunch()
+	browser := rod.New().ControlURL(u).MustConnect()
+	defer browser.MustClose()
 
 	for year := startYear; year <= endYear; year++ {
-		// B3A year archive URL structure (approximate)
 		url := fmt.Sprintf("https://www.baaa-acro.com/crash-archives?year=%d", year)
-		err := c.Visit(url)
+		fmt.Printf("Visiting B3A (Headless): %s\n", url)
+		
+		page := stealth.MustPage(browser)
+		
+		err := page.Navigate(url)
 		if err != nil {
-			log.Printf("Failed to visit B3A year %d: %v\n", year, err)
+			log.Printf("Failed to navigate B3A %d: %v\n", year, err)
+			page.MustClose()
+			continue
 		}
+
+		page.MustWaitLoad()
+		time.Sleep(3 * time.Second)
+
+		// B3A uses a view with rows. Let's try to extract all links to individual crash pages
+		links, err := page.Elements("a[href*='/crash/crash-']")
+		if err != nil {
+			log.Printf("No crash links found for B3A year %d\n", year)
+			page.MustClose()
+			continue
+		}
+
+		for _, link := range links {
+			href, err := link.Property("href")
+			if err != nil || href.Nil() {
+				continue
+			}
+			
+			sourceURL := href.String()
+			
+			// We can parse the URL itself as a fallback if we don't visit every page.
+			// Example: https://www.baaa-acro.com/crash/crash-cessna-208b-grand-caravan-guyana-1-killed
+			parts := strings.Split(sourceURL, "/crash/crash-")
+			if len(parts) < 2 {
+				continue
+			}
+			
+			slug := parts[1]
+			// A very naive parsing of the slug:
+			// "cessna-208b-grand-caravan-guyana-1-killed"
+			slugParts := strings.Split(slug, "-")
+			model := ""
+			if len(slugParts) > 0 {
+				model = strings.Title(slugParts[0]) // e.g. "Cessna"
+			}
+			
+			accident := Accident{
+				Date:          fmt.Sprintf("%d-01-01", year), // Fallback date
+				AircraftModel: model + " (B3A)",
+				Operator:      "",
+				Fatalities:    "",
+				Location:      "Unknown",
+				SourceURL:     sourceURL,
+			}
+			InsertAccident(db, accident)
+		}
+
+		page.MustClose()
+		time.Sleep(3 * time.Second)
 	}
-	
-	c.Wait()
 }
