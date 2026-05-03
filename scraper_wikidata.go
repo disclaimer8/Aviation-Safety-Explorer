@@ -43,7 +43,7 @@ LIMIT 1000
 	}
 	req.Header.Set("Accept", "application/sparql-results+json")
 	// Wikidata requires a descriptive User-Agent
-	req.Header.Set("User-Agent", "AviationSafetyExplorer/1.0 (denyskolomiiets@example.com) Go/1.22")
+	req.Header.Set("User-Agent", "AviationSafetyExplorer/1.0 (disclaimer8@gmail.com) Go/1.22")
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
